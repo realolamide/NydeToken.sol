@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
+contract NydeToken is ERC20, ERC20Burnable, Ownable, ReentrancyGuard {
+    uint256 public constant MAX_SUPPLY = 23_000_000 * 10 ** 18;
+    uint256 public halvingInterval;
+    uint256 public nextHalving;
+    uint256 public rewardPerBlock;
+    mapping(address => uint256) public stakingBalances;
+    mapping(address => uint256) public stakingTimestamps;
+    uint256 public stakingRate = 10; // 10% annual staking reward
+
+    // Universal Basic Rewards
+    mapping(address => uint256) public lastClaim;
+    uint256 public constant BASIC_REWARD_INTERVAL = 30 days;
+    uint256 public basicRewardAmount = 100 * 10 ** 18;
+
+    // Carbon Offset Mechanism
+    mapping(address => uint256) public carbonCredits;
+    event CarbonOffset(address indexed user, uint256 credits);
+
+    // Utility Payment Mechanism
+    event UtilityPayment(address indexed user, uint256 amount, string utilityType);
+
+    // Fee Redistribution
+    uint256 public redistributionFee = 1; // 1% fee for redistribution
+    address[] private holders;
+    mapping(address => bool) private holderExists;
+
+    // Cross-Chain Interoperability
+    event CrossChainBridge(address indexed user, uint256 amount, string targetChain);
+
+    // Charity Pool
+    uint256 public charityPool;
+    event CharityDonation(address indexed user, uint256 amount);
+
+    event RewardHalved(uint256 newRewardPerBlock);
+    event Staked(address indexed user, uint256 amount);
+    event Withdrawn(address indexed user, uint256 amount, uint256 reward);
+
+    constructor(uint256 _initialRewardPerBlock, uint256 _halvingInterval) ERC20("Nyde", "NYD") {
+        rewardPerBlock = _initialRewardPerBlock;
+        halvingInterval = _halvingInterval;
+        nextHalving = block.timestamp + halvingInterval;
+        _mint(msg.sender, 10_000_000 * 10 ** 18); // Initial supply to owner
+    }
+
+    function mint(address to, uint256 amount) external onlyOwner {
+        require(totalSupply() + amount <= MAX_SUPPLY, "Exceeds max supply");
+        _mint(to, amount);
+    }
+
+    function burn(uint256 amount) public override {
+        super.burn(amount);
+    }
+
+    function halveReward() external {
+        require(block.timestamp >= nextHalving, "Halving not yet available");
+        rewardPerBlock /= 2;
+        nextHalving = block.timestamp + halvingInterval;
+        emit RewardHalved(rewardPerBlock);
+    }
+
+    function stake(uint256 amount) external nonReentrant {
+        require(amount > 0, "Cannot stake zero tokens");
+        _transfer(msg.sender, address(this), amount);
+        stakingBalances[msg.sender] += amount;
+        stakingTimestamps[msg.sender] = block.timestamp;
+        if (!holderExists[msg.sender]) {
+            holders.push(msg.sender);
+            holderExists[msg.sender] = true;
+        }
+        emit Staked(msg.sender, amount);
+    }
+
+    function withdrawStake() external nonReentrant {
+        uint256 balance = stakingBalances[msg.sender];
+        require(balance > 0, "No tokens staked");
+
+        uint256 stakingDuration = block.timestamp - stakingTimestamps[msg.sender];
+        uint256 reward = calculateStakingReward(balance, stakingDuration);
+
+        stakingBalances[msg.sender] = 0;
+        stakingTimestamps[msg.sender] = 0;
+
+        require(totalSupply() + reward <= MAX_SUPPLY, "Exceeds max supply");
+        _mint(msg.sender, reward);
+        _transfer(address(this), msg.sender, balance);
+
+        emit Withdrawn(msg.sender, balance, reward);
+    }
+
+    function calculateStakingReward(uint256 stakedAmount, uint256 duration) public view returns (uint256) {
+        return (stakedAmount * stakingRate * duration) / (100 * 365 days);
+    }
+
+    function setStakingRate(uint256 newRate) external onlyOwner {
+        stakingRate = newRate;
+    }
+
+    function emergencyWithdraw() external onlyOwner {
+        uint256 contractBalance = balanceOf(address(this));
+        _transfer(address(this), msg.sender, contractBalance);
+    }
+
+    function governanceProposal(address target, bytes memory data) external onlyOwner {
+        (bool success, ) = target.call(data);
+        require(success, "Governance proposal execution failed");
+    }
+
+    function claimBasicReward() external nonReentrant {
+        require(block.timestamp >= lastClaim[msg.sender] + BASIC_REWARD_INTERVAL, "Claim interval not reached");
+        require(totalSupply() + basicRewardAmount <= MAX_SUPPLY, "Exceeds max supply");
+
+        _mint(msg.sender, basicRewardAmount);
+        lastClaim[msg.sender] = block.timestamp;
+    }
+
+    function offsetCarbon(uint256 credits) external nonReentrant {
+        require(credits > 0, "Credits must be greater than zero");
+        require(balanceOf(msg.sender) >= credits, "Insufficient balance to offset");
+
+        _burn(msg.sender, credits);
+        carbonCredits[msg.sender] += credits;
+
+        emit CarbonOffset(msg.sender, credits);
+    }
+
+    function setBasicRewardAmount(uint256 newAmount) external onlyOwner {
+        basicRewardAmount = newAmount;
+    }
+
+    function makeUtilityPayment(uint256 amount, string memory utilityType) external nonReentrant {
+        require(amount > 0, "Cannot pay zero amount");
+        _burn(msg.sender, amount);
+        emit UtilityPayment(msg.sender, amount, utilityType);
+    }
+
+    function redistributeFees() external onlyOwner {
+        uint256 contractBalance = balanceOf(address(this));
+        require(contractBalance > 0, "No fees to redistribute");
+
+        uint256 feePerHolder = contractBalance / holders.length;
+        for (uint256 i = 0; i < holders.length; i++) {
+            _transfer(address(this), holders[i], feePerHolder);
+        }
+    }
+
+    function donateToCharity(uint256 amount) external nonReentrant {
+        require(amount > 0, "Cannot donate zero tokens");
+        _transfer(msg.sender, address(this), amount);
+        charityPool += amount;
+        emit CharityDonation(msg.sender, amount);
+    }
+
+    function crossChainTransfer(uint256 amount, string memory targetChain) external nonReentrant {
+        require(amount > 0, "Amount must be greater than zero");
+        _burn(msg.sender, amount);
+        emit CrossChainBridge(msg.sender, amount, targetChain);
+    }
+}
